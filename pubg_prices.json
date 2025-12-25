@@ -1,0 +1,51 @@
+[
+    {
+        "name": "60 UC",
+        "price": 3600,
+        "products": [
+            "uc60"
+        ]
+    },
+    {
+        "name": "325 UC",
+        "price": 18000,
+        "products": [
+            "uc325"
+        ]
+    },
+    {
+        "name": "660 UC",
+        "price": 35200,
+        "products": [
+            "uc660"
+        ]
+    },
+    {
+        "name": "1800 UC",
+        "price": 88000,
+        "products": [
+            "uc1800"
+        ]
+    },
+    {
+        "name": "3850 UC",
+        "price": 174500,
+        "products": [
+            "uc3850"
+        ]
+    },
+    {
+        "name": "8100 UC",
+        "price": 348000,
+        "products": [
+            "uc8100"
+        ]
+    },
+    {
+        "name": "16200 UC",
+        "price": 684000,
+        "products": [
+            "uc16200"
+        ]
+    }
+]

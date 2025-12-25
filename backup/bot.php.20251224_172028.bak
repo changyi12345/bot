@@ -1,0 +1,568 @@
+<?php
+error_reporting(0);
+date_default_timezone_set("Asia/Yangon");
+
+/* ========= CFG ========= */
+$BOT="7279743667:AAHbJKx12tWP5nY_zWF6TG-6fdl1NHCOls8";//BOT TOken
+$API="https://api.telegram.org/bot$BOT/";
+
+define("SMILE_API","https://saigameshop.com/PixelPlay/"); // ML order endpoint
+define("ML_CHECK_API","https://saigameshop.com/Autogameshop/mobileLegends/server.php");
+
+define("G2_CHECK","https://api.g2bulk.com/v1/games/checkPlayerId");
+define("G2_KEY","4894e337b8aeeaf86916dea77cc2d78a3bfacf4644de70166066e389");
+define("HOK_GAME","hok");
+
+define("PUBG_API","https://saigameshop.com/Autogameshop/api.php");
+define("PUBG_KEY","c89ab76ef669d22e0c9");
+
+define("ML_FILE",__DIR__."/prices.json");
+define("UC_FILE",__DIR__."/pubg_prices.json");        // bot-side list (wrapper or array)
+define("CODE_FILE",__DIR__."/pubg_code_prices.json"); // bot-side list (wrapper or array)
+
+define("UFILE",__DIR__."/data/users.json");
+define("HFILE",__DIR__."/data/history.json");
+define("TFILE",__DIR__."/data/topups.json");          // pending topup requests
+
+define("TOPUP","@Kage_Ran");
+define("PS",10);
+
+/* ========= INIT FILES ========= */
+@mkdir(__DIR__."/data",0777,true);
+if(!file_exists(UFILE)) file_put_contents(UFILE,"{}",LOCK_EX);
+if(!file_exists(HFILE)) file_put_contents(HFILE,"{}",LOCK_EX); // history per-user array
+if(!file_exists(TFILE)) file_put_contents(TFILE,"[]",LOCK_EX); // topup requests
+
+/* ========= INPUT ========= */
+$u=json_decode(file_get_contents("php://input"),true)?:[];
+$cid=$u["message"]["chat"]["id"]??($u["callback_query"]["message"]["chat"]["id"]??0);
+$txt=trim($u["message"]["text"]??"");
+$cb =$u["callback_query"]["data"]??"";
+$cbid=$u["callback_query"]["id"]??"";
+$mid =$u["callback_query"]["message"]["message_id"]??0;
+$umid=$u["message"]["message_id"]??0;
+if(!$cid) exit;
+
+/* ========= CORE ========= */
+function h($s){return htmlspecialchars((string)$s,ENT_QUOTES,"UTF-8");}
+function jr($f){return file_exists($f)?(json_decode(file_get_contents($f),true)?:[]):[];}
+function jw($f,$d){
+  @mkdir(dirname($f),0777,true);
+  $t=$f.".tmp";
+  file_put_contents($t,json_encode($d,JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT),LOCK_EX);
+  @rename($t,$f);
+}
+function tg($m,$d){
+  global $API;
+  $ch=curl_init($API.$m);
+  curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>1,CURLOPT_POST=>1,CURLOPT_POSTFIELDS=>$d,CURLOPT_TIMEOUT=>25]);
+  $r=curl_exec($ch); curl_close($ch);
+  return json_decode($r,true)?:["ok"=>0,"raw"=>$r];
+}
+function send($cid,$t,$k=null){
+  $p=["chat_id"=>$cid,"text"=>$t,"parse_mode"=>"HTML","disable_web_page_preview"=>true];
+  if($k) $p["reply_markup"]=json_encode($k,JSON_UNESCAPED_UNICODE);
+  tg("sendMessage",$p);
+}
+function editm($cid,$mid,$t,$k=null){
+  $p=["chat_id"=>$cid,"message_id"=>$mid,"text"=>$t,"parse_mode"=>"HTML","disable_web_page_preview"=>true];
+  if($k) $p["reply_markup"]=json_encode($k,JSON_UNESCAPED_UNICODE);
+  tg("editMessageText",$p);
+}
+function cbok($id){ if($id) tg("answerCallbackQuery",["callback_query_id"=>$id,"text"=>""]); }
+function delm($cid,$mid){ if($mid) tg("deleteMessage",["chat_id"=>$cid,"message_id"=>$mid]); }
+
+function postf($url,$data){
+  $ch=curl_init($url);
+  curl_setopt_array($ch,[
+    CURLOPT_RETURNTRANSFER=>1,
+    CURLOPT_POST=>1,
+    CURLOPT_POSTFIELDS=>http_build_query($data),
+    CURLOPT_TIMEOUT=>30,
+    CURLOPT_CONNECTTIMEOUT=>10,
+    CURLOPT_FOLLOWLOCATION=>1,
+    CURLOPT_SSL_VERIFYPEER=>0,
+    CURLOPT_SSL_VERIFYHOST=>0
+  ]);
+  $r=curl_exec($ch); $e=curl_error($ch); curl_close($ch);
+  if($r===false) return ["ok"=>0,"error"=>$e?: "curl_error"];
+  $j=json_decode($r,true);
+  return is_array($j)?$j:["ok"=>0,"error"=>"Invalid JSON","raw"=>$r];
+}
+function postj($url,$payload,$hdr=[]){
+  $ch=curl_init($url);
+  curl_setopt_array($ch,[
+    CURLOPT_RETURNTRANSFER=>1,
+    CURLOPT_POST=>1,
+    CURLOPT_POSTFIELDS=>json_encode($payload),
+    CURLOPT_TIMEOUT=>30,
+    CURLOPT_CONNECTTIMEOUT=>10,
+    CURLOPT_FOLLOWLOCATION=>1,
+    CURLOPT_HTTPHEADER=>array_merge(["Content-Type: application/json"],$hdr),
+    CURLOPT_SSL_VERIFYPEER=>0,
+    CURLOPT_SSL_VERIFYHOST=>0
+  ]);
+  $r=curl_exec($ch); $e=curl_error($ch); curl_close($ch);
+  if($r===false) return ["ok"=>0,"error"=>$e?: "curl_error"];
+  $j=json_decode($r,true);
+  return is_array($j)?$j:["ok"=>0,"error"=>"Invalid JSON","raw"=>$r];
+}
+function mmk($n){ return number_format((int)round((float)$n))." MMK"; }
+
+/* ========= ID CHECK ========= */
+function g2_name($r){
+  return $r["name"]??$r["username"]??$r["player_name"]
+    ??($r["data"]["player_name"]??($r["data"]["name"]??($r["data"]["username"]??null)));
+}
+function g2_check_game($game,$pid){
+  $p=["game"=>(string)$game,"user_id"=>(string)$pid];
+
+  $r=postj(G2_CHECK,$p,["Authorization: Bearer ".G2_KEY]);
+  $name=g2_name($r);
+  if($name) return ["ok"=>1,"name"=>$name];
+
+  $r2=postj(G2_CHECK,$p,[]);
+  $name2=g2_name($r2);
+  if($name2) return ["ok"=>1,"name"=>$name2];
+
+  return ["ok"=>0,"error"=>$r["message"]??$r2["message"]??$r["error"]??$r2["error"]??"G2_CHECK_FAIL"];
+}
+function ml_check($gid,$sid){
+  $r=postf(ML_CHECK_API,[
+    "action"=>"name-check",
+    "game_id"=>(string)$gid,
+    "server_id"=>(string)$sid,
+    "game"=>"mlbb"
+  ]);
+  $name = $r["username"]??$r["name"]??$r["ign"]
+       ??($r["data"]["username"]??($r["data"]["name"]??($r["data"]["ign"]??null)));
+  $region = $r["region"]??($r["data"]["region"]??(string)$sid);
+  return $name ? ["ok"=>1,"name"=>$name,"region"=>$region,"gameid"=>(string)$gid,"zoneid"=>(string)$sid]
+               : ["ok"=>0,"error"=>$r["message"]??$r["error"]??"ML_CHECK_FAIL"];
+}
+function pubg_check($pid){ return g2_check_game("pubgm",$pid); }
+function hok_check($pid){ return g2_check_game(HOK_GAME,$pid); }
+
+/* ========= ORDER ========= */
+function ml_order($uid,$zone,$code){
+  return postf(SMILE_API,["action"=>"ml_order","user_id"=>(string)$uid,"zone_id"=>(string)$zone,"product_code"=>(string)$code]);
+}
+function uc_order($pid,$item,$qty=1){
+  $r=postf(PUBG_API,[
+    "action"=>"gameorder","type"=>"uc",
+    "player_id"=>(string)$pid,
+    "item_id"=>(string)$item,   // ✅ api.php uses item_id to find prices.json id
+    "qty"=>(int)$qty,
+    "api_key"=>(string)PUBG_KEY
+  ]);
+  return !empty($r["ok"]) ? ["ok"=>1,"sn"=>$r["order_no"]??"OK"] : ["ok"=>0,"error"=>$r["error"]??$r["message"]??"ORDER_FAIL","raw"=>$r];
+}
+
+/* ✅ PUBG CODE: MUST send item_id (NOT product_id) */
+function code_order($itemId,$qty=1){
+  $r=postf(PUBG_API,[
+    "action"=>"gameorder","type"=>"code",
+    "item_id"=>(string)$itemId, // ✅ IMPORTANT
+    "qty"=>(int)$qty,
+    "api_key"=>(string)PUBG_KEY
+  ]);
+  $codes=$r["codes"]??($r["data"]["codes"]??($r["code"]??($r["data"]["code"]??null)));
+  return !empty($r["ok"]) ? ["ok"=>1,"sn"=>$r["order_no"]??"OK","codes"=>$codes] : ["ok"=>0,"error"=>$r["error"]??$r["message"]??"ORDER_FAIL","raw"=>$r];
+}
+
+/* ========= PRODUCTS ========= */
+/* ✅ wrapper/array both supported */
+function load_list($file,$mode){
+  $d=jr($file);
+
+  // wrapper object: {"pubg_code":[...]} / {"pubg_uc":[...]}
+  if($mode==="CODE" && is_array($d) && isset($d["pubg_code"]) && is_array($d["pubg_code"])) $d=$d["pubg_code"];
+  if($mode==="UC"   && is_array($d) && isset($d["pubg_uc"])   && is_array($d["pubg_uc"]))   $d=$d["pubg_uc"];
+
+  // if still wrapper but file has only one key, try auto unwrap
+  if($mode!=="ML" && is_array($d) && isset($d["name"])===false){
+    // do nothing; we'll filter only item arrays below
+  }
+
+  $out=[];
+  if(!is_array($d)) return [];
+  foreach($d as $p){
+    if(!is_array($p)) continue;
+    $name=trim((string)($p["name"]??""));
+    if($name==="") continue;
+    $out[]=$p;
+  }
+  return $out;
+}
+
+/*
+  ✅ ID PICKER (align with server api.php)
+  - PUBG UC/CODE: send item_id = prices.json item's "id"
+  - ML: keep existing mapping
+*/
+function pick_product_id($mode,$p){
+
+  if($mode==="UC"){
+    // some UC lists use products array, some use id
+    if(isset($p["products"]) && is_array($p["products"]) && count($p["products"])>0){
+      return array_values(array_filter(array_map("strval",$p["products"])));
+    }
+    $x=$p["id"]??$p["item_id"]??null;
+    return $x!==null ? [(string)$x] : [];
+  }
+
+  if($mode==="CODE"){
+    // ✅ MUST be id like "v60","v325" (server finds by id)
+    $x=$p["id"]??null;
+    return $x!==null ? [(string)$x] : [];
+  }
+
+  // ML
+  $x=$p["products"]??$p["product_code"]??$p["product"]??null;
+  if(is_array($x)) return array_values(array_filter(array_map("strval",$x)));
+  return $x!==null ? [(string)$x] : [];
+}
+
+/* ========= UI ========= */
+function home_txt($bal){
+  return "🟡 <b>𝐁𝐄𝐄 𝐀𝐮𝐭𝐨 𝐓𝐎𝐏-𝐔𝐏 𝐁𝐎𝐓</b>\n━━━━━━━━━━━━━━━━━━\n".
+         "⚡️ ငွေရှိယုံဖြင့် 24နာရီကြိုက်တဲ့အချိန် ဝယ်ယူလို့ရပါတယ်ရှင့်\n\n".
+         "🤖 𝗕𝗢𝗧 𝗨𝗽𝗱𝗮𝘁𝗲 𝗖𝗵𝗮𝗻𝗻𝗲𝗹\n @BEE_Game_Shop\n\n".
+         "💰 𝐖𝐚𝐥𝐥𝐞𝐭 𝐀𝐦𝐨𝐮𝐧𝐭𝐬 : <b>".h(mmk($bal))."</b>\n".
+         "👤 Admin : <b>".h(TOPUP)."</b>\n\n".
+         "⏬<b>မီနူးရွေးပါရှင့်</b>";
+}
+function kmenu(){return ["inline_keyboard"=>[
+  [["text"=>"🛒 Order တင်ရန်","callback_data"=>"NAV:ORDER"],["text"=>"🆔 ID စစ်ရန် Check","callback_data"=>"NAV:ID"]],
+  [["text"=>"📜 History ကြည့်ရန်","callback_data"=>"SYS:HIS"],["text"=>"💸 Topup / ငွေဖြည့်ရန်","callback_data"=>"NAV:TOPUP"]],
+]];}
+function globalpubg(){return ["inline_keyboard"=>[
+  [["text"=>"💵 PUBG UC","callback_data"=>"ORD:UC:PAGE:0"]],
+  [["text"=>"🎫 PUBG CODE","callback_data"=>"ORD:CODE:PAGE:0"]],
+  [["text"=>"🎫 PUBG CODE Redeem","url"=>"https://www.midasbuy.com/midasbuy/ae/redeem/pubgm"]],
+  [["text"=>"⬅️ BACK","callback_data"=>"ORD:$mode:PAGE:$page"],["text"=>"🏠 HOME","callback_data"=>"NAV:HOME"],],
+]];}
+function korder(){return ["inline_keyboard"=>[
+  [["text"=>"💎 𝐌𝐋𝐁𝐁 𝐃𝐢𝐚𝐦𝐨𝐧𝐝 𝐆𝐥𝐨𝐛𝐚𝐥","callback_data"=>"ORD:ML:PAGE:0"]],
+  [["text"=>"💵 𝐏𝐔𝐁𝐆 𝐔𝐂 𝐆𝐥𝐨𝐛𝐚𝐥","callback_data"=>"NAV:GLOBALPUBG"]],
+  [["text"=>"🏠 HOME","callback_data"=>"NAV:HOME"]],
+]];}
+function kid(){return ["inline_keyboard"=>[
+  [["text"=>"💎 ML  /m","callback_data"=>"HELP:ML"],["text"=>"💵 PUBG /p","callback_data"=>"HELP:P"]],
+  [["text"=>"👑 HOK /h","callback_data"=>"HELP:H"],["text"=>"🏠 HOME","callback_data"=>"NAV:HOME"]],
+]];}
+function ktop(){return ["inline_keyboard"=>[
+  [["text"=>"💬 CONTACT ADMIN","url"=>"https://t.me/".ltrim(TOPUP,"@")]],
+  [["text"=>"🏠 HOME","callback_data"=>"NAV:HOME"]],
+]];}
+function kcmd(){return ["inline_keyboard"=>[
+  [["text"=>"1","callback_data"=>"CMD:1"],["text"=>"2","callback_data"=>"CMD:2"],["text"=>"3","callback_data"=>"CMD:3"]],
+  [["text"=>"4","callback_data"=>"CMD:4"],["text"=>"5","callback_data"=>"CMD:5"],["text"=>"6","callback_data"=>"CMD:6"]],
+  [["text"=>"7","callback_data"=>"CMD:7"],["text"=>"8","callback_data"=>"CMD:8"],["text"=>"9","callback_data"=>"CMD:9"]],
+  [["text"=>"10","callback_data"=>"CMD:10"],["text"=>"11","callback_data"=>"CMD:11"],["text"=>"12","callback_data"=>"CMD:12"]],
+  [["text"=>"🏠 HOME","callback_data"=>"NAV:HOME"]],
+]];}
+function kconfirm($mode,$page){return ["inline_keyboard"=>[
+  [["text"=>"✅ 𝐎𝐫𝐝𝐞𝐫 𝐂𝐨𝐧𝐟𝐢𝐫𝐦","callback_data"=>"ORD:$mode:CONFIRM"]],
+  [["text"=>"⬅️ BACK","callback_data"=>"ORD:$mode:PAGE:$page"],["text"=>"🏠 HOME","callback_data"=>"NAV:HOME"]],
+]];}
+function klist($list,$mode,$page){
+  $page=max(0,(int)$page);
+  $max=max(0,(int)ceil(count($list)/PS)-1);
+  if($page>$max) $page=$max;
+
+  $slice=array_slice($list,$page*PS,PS,true);
+  $ik=[];
+  foreach($slice as $i=>$p){
+    $pr=(float)($p["price"]??0);
+    $ik[]=[["text"=>"• ".$p["name"]."  ".($pr>0?mmk($pr):"—"),"callback_data"=>"ORD:$mode:PICK:$i:$page"]];
+  }
+  $nav=[];
+  if($page>0) $nav[]=["text"=>"⬅️ Prev","callback_data"=>"ORD:$mode:PAGE:".($page-1)];
+  $nav[]=["text"=>"🏠 Home","callback_data"=>"NAV:HOME"];
+  if($page<$max) $nav[]=["text"=>"➡️ Next","callback_data"=>"ORD:$mode:PAGE:".($page+1)];
+  $ik[]=$nav;
+  $ik[]=[["text"=>"⬅️ Back","callback_data"=>"NAV:ORDER"]];
+  return ["inline_keyboard"=>$ik];
+}
+
+/* ========= STORE ========= */
+$users=jr(UFILE);
+$hist=jr(HFILE);
+$tups=jr(TFILE);
+if(!is_array($users)) $users=[];
+if(!is_array($hist)) $hist=[];
+if(!is_array($tups)) $tups=[];
+
+// create / update user (keep existing ban, balance, states)
+if(!isset($users[$cid])){
+  $users[$cid]=["bal"=>0.0,"st"=>"","tmp"=>[]];
+}
+
+// save telegram username for admin list
+$uname=$u["message"]["from"]["username"]??($u["callback_query"]["from"]["username"]??"");
+if($uname!==""){
+  $users[$cid]["uname"]=(string)$uname;
+}
+jw(UFILE,$users);
+
+// 🔒 check ban
+if(!empty($users[$cid]["ban"])){
+  send($cid,"❌ <b>Account သည် Admin မှ ထိန်းချုပ်ထားပါတယ်</b>\nအကူအညီလိုပါက Admin - ".h(TOPUP)." ကို ဆက်သွယ်ပါရှင့်.");
+  exit;
+}
+
+$st=$users[$cid]["st"]??"";
+
+/* ========= START ========= */
+if($txt==="/start"){
+  delm($cid,$umid);
+  $users[$cid]["st"]=""; $users[$cid]["tmp"]=[];
+  jw(UFILE,$users);
+  send($cid,home_txt($users[$cid]["bal"]),kmenu()); exit;
+}
+
+/* ========= ID CHECK COMMANDS ========= */
+if($txt){
+  if(preg_match('/^(@cmd|\/cmd)\b/i',$txt)){
+    send($cid,"📋 <b>Command Menu (1–12)</b>\n━━━━━━━━━━━━━━━━━━\nခေါ်မည့် number ကို အောက်က Button နဲ့ ရွေးချယ်ပါ။",kcmd()); exit;
+  }
+  if(preg_match('/^\/m\s+(\d+)\s+(\d+)\s*$/i',$txt,$m)){
+    $c=ml_check($m[1],$m[2]);
+    send($cid, !empty($c["ok"])
+      ? "✅ <b>𝐌𝐋 𝐈𝐃 𝐂𝐡𝐞𝐜𝐤 𝐃𝐨𝐧𝐞</b>\n━━━━━━━━━━━━━━━━━━\n𝐏𝐥𝐚𝐲𝐞𝐫 𝐍𝐚𝐦𝐞 : <b>".h($c["name"])."</b>\n𝐑𝐞𝐠𝐢𝐨𝐧 : <b>".h($c["region"])."</b>\n𝐏𝐥𝐚𝐲𝐞𝐫 𝐈𝐃 : <code>".h($c["gameid"])."</code>\n𝐙𝐨𝐧𝐞𝐈𝐃 : <code>".h($c["zoneid"])."</code>"
+      : "❌ <b>ML FAIL</b>\n<code>".h($c["error"])."</code>"
+    ,kmenu()); exit;
+  }
+  if(preg_match('/^\/p\s+(\d{6,20})\s*$/i',$txt,$m)){
+    $c=pubg_check($m[1]);
+    send($cid, !empty($c["ok"])
+      ? "✅ <b>𝙿𝚄𝙱𝙶 𝙸𝙳 𝙲𝚑𝚎𝚌𝚔 𝙳𝚘𝚗𝚎</b>\n━━━━━━━━━━━━━━━━━━\n𝐏𝐥𝐚𝐲𝐞𝐫 𝐍𝐚𝐦𝐞 : <b>".h($c["name"])."</b>\n𝐏𝐥𝐚𝐲𝐞𝐫𝐈𝐃 : <code>".h($m[1])."</code>"
+      : "❌ <b>PUBG FAIL</b>\n<code>".h($c["error"])."</code>"
+    ,kmenu()); exit;
+  }
+  if(preg_match('/^\/h\s+([0-9A-Za-z\-_]{4,25})\s*$/i',$txt,$m)){
+    $c=hok_check($m[1]);
+    send($cid, !empty($c["ok"])
+      ? "✅ <b>HOK ID CHECK 𝙳𝚘𝚗𝚎</b>\n━━━━━━━━━━━━━━━━━━\n𝐏𝐥𝐚𝐲𝐞𝐫 𝐍𝐚𝐦𝐞 : <b>".h($c["name"])."</b>\n𝐏𝐥𝐚𝐲𝐞𝐫𝐈𝐃 : <code>".h($m[1])."</code>"
+      : "❌ <b>HOK FAIL</b>\n<code>".h($c["error"])."</code>"
+    ,kmenu()); exit;
+  }
+}
+
+/* ========= CALLBACKS ========= */
+if($cb){
+  cbok($cbid);
+
+  if($cb==="NAV:HOME"){ $users[$cid]["st"]=""; $users[$cid]["tmp"]=[]; jw(UFILE,$users); editm($cid,$mid,home_txt($users[$cid]["bal"]),kmenu()); exit; }
+  if($cb==="NAV:GLOBALPUBG"){ editm($cid,$mid,"<b>𝐏𝐔𝐁𝐆 𝐔𝐂 𝐆𝐥𝐨𝐛𝐚𝐥</b>\n<b>𝐏𝐚𝐜𝐤𝐚𝐠𝐞 ရွေးချယ်ပါရှင့် ❤️</b>",globalpubg()); exit; }
+  if($cb==="NAV:ORDER"){ $users[$cid]["st"]=""; $users[$cid]["tmp"]=[]; jw(UFILE,$users); editm($cid,$mid,"🛒 <b>ORDER</b>\n━━━━━━━━━━━━━━━━━━\nဝယ်ယူရန်အတွက် Game ရွေးချယ်ပါ",korder()); exit; }
+  if($cb==="NAV:ID"){ editm($cid,$mid,"🆔 <b>ID CHECK</b>\n━━━━━━━━━━━━━━━━━━\n💎 ML  : <code>/m gameid zoneid</code>\n💵 PUBG: <code>/p gameid</code>\n👑 HOK : <code>/h gameid</code>",kid()); exit; }
+  if($cb==="NAV:TOPUP"){
+    $users[$cid]["st"]="WAIT_TOPUP_AMT";
+    $users[$cid]["tmp"]=[];
+    jw(UFILE,$users);
+    editm($cid,$mid,"💸 <b>Topup / ငွေဖြည့်ရန်</b>\n━━━━━━━━━━━━━━━━━━\n\nထည့်မယ့် amount ကို MMK နဲ့ ရိုက်ထည့်ပါ\nဥပမာ: <code>5000</code> ၊ <code>10000</code> ၊ <code>15000</code>",kmenu());
+    exit;
+  }
+
+  if(preg_match('/^CMD:(\d{1,2})$/',$cb,$m)){
+    $n=(int)$m[1];
+    if($n<1 || $n>12){ editm($cid,$mid,home_txt($users[$cid]["bal"]),kmenu()); exit; }
+    editm($cid,$mid,"✅ <b>Selected Command</b>\n━━━━━━━━━━━━━━━━━━\nYou chose: <b>$n</b>\n\nအခု command နံပါတ်ကို သင့် usage အလိုက် သုံးနိုင်ပါတယ်။",kcmd()); exit;
+  }
+
+  if($cb==="SYS:HIS"){
+    $hist=jr(HFILE); $list=$hist[$cid]??[];
+    if(!$list){ editm($cid,$mid,"📜 <b>HISTORY</b>\n━━━━━━━━━━━━━━━━━━\n— No history —",["inline_keyboard"=>[[["text"=>"🏠 HOME","callback_data"=>"NAV:HOME"]]]]); exit; }
+    $x=end($list);
+    editm($cid,$mid,"📜 <b>HISTORY</b>\n━━━━━━━━━━━━━━━━━━\nTime: ".h($x["time"]??"-")."\nGame: ".h($x["game"]??"-")."\nItem: ".h($x["order"]??"-")."\nSN: <code>".h($x["sn"]??"-")."</code>",["inline_keyboard"=>[[["text"=>"🏠 HOME","callback_data"=>"NAV:HOME"]]]]); exit;
+  }
+
+  if(preg_match('/^ORD:(ML|UC|CODE):PAGE:(\d+)$/',$cb,$m)){
+    $mode=$m[1]; $page=(int)$m[2];
+    $file=($mode==="ML")?ML_FILE:(($mode==="UC")?UC_FILE:CODE_FILE);
+    $list=load_list($file,$mode);
+
+    $users[$cid]["tmp"]=["mode"=>$mode,"page"=>$page,"list"=>$list]; $users[$cid]["st"]=""; jw(UFILE,$users);
+
+    $title=($mode==="ML")?"💎 <b>𝐌𝐋𝐁𝐁 𝐃𝐢𝐚𝐦𝐨𝐧𝐝</b>":(($mode==="UC")?"💵 <b>𝐏𝐔𝐁𝐆 𝐔𝐂</b>":"🎫 <b>𝐏𝐔𝐁𝐆 𝐔𝐂 𝐂𝐨𝐝𝐞</b>");
+    editm($cid,$mid,$title."  𝐏𝐫𝐢𝐜𝐞𝐬 𝐋𝐢𝐬𝐭\n𝐖𝐚𝐢𝐭𝐢𝐧𝐠 𝐭𝐢𝐦𝐞 𝟎𝐒𝐞𝐜 / မစောင့်ရပါရှင့် ❤️",klist($list,$mode,$page)); exit;
+  }
+
+  if(preg_match('/^ORD:(ML|UC|CODE):PICK:(\d+):(\d+)$/',$cb,$m)){
+    $mode=$m[1]; $idx=(int)$m[2]; $page=(int)$m[3];
+    $list=$users[$cid]["tmp"]["list"]??[];
+    if(!isset($list[$idx])){ editm($cid,$mid,"❌ Item not found",korder()); exit; }
+
+    $pick=$list[$idx];
+    $codes=pick_product_id($mode,$pick);
+    if(!$codes){ editm($cid,$mid,"❌ Product ID missing\n(ဖိုင်ထဲ id/products စစ်ပါ)",korder()); exit; }
+
+    $users[$cid]["tmp"]=["mode"=>$mode,"page"=>$page,"pick"=>$pick,"codes"=>$codes];
+    $users[$cid]["st"]=($mode==="ML")?"WAIT_ML":(($mode==="UC")?"WAIT_PUBG":"WAIT_QTY");
+    jw(UFILE,$users);
+
+    $need=($mode==="ML")?"💎 ML ID ထည့်ပါ\n<code>gameid zoneid</code>"
+        :(($mode==="UC")?"💵 PUBG ID ထည့်ပါ\n<code>gameid</code>"
+        :"🎫 Qty ထည့်ပါ\n<code>1-50</code>");
+
+    $pr=(float)($pick["price"]??0);
+    editm($cid,$mid,"✅ <b>Selected</b>\n━━━━━━━━━━━━━━━━━━\n".
+      "Item: <b>".h($pick["name"])."</b>\n".
+      "Price: <b>".h($pr>0?mmk($pr):"—")."</b>\n\n".$need,
+      ["inline_keyboard"=>[
+     [["text"=>"⬅️ Back","callback_data"=>"ORD:$mode:PAGE:$page"],["text"=>"🏠 HOME","callback_data"=>"NAV:HOME"]],
+      ]]
+    ); exit;
+  }
+
+  if(preg_match('/^ORD:(ML|UC|CODE):CONFIRM$/',$cb,$m)){
+    $mode=$m[1];
+    if(($users[$cid]["st"]??"")!==("READY_$mode")){ editm($cid,$mid,"⏳ Session Lost\n/start",kmenu()); exit; }
+
+    $t=$users[$cid]["tmp"]; $pick=$t["pick"]??null; $codes=$t["codes"]??[];
+    if(!$pick || !$codes){ editm($cid,$mid,"⏳ Session Lost\n/start",kmenu()); exit; }
+
+    $unit=(float)($pick["price"]??0);
+    $qty = ($mode==="CODE") ? max(1,min(50,(int)($t["qty"]??1))) : 1;
+    $price= ($mode==="CODE") ? ($unit*$qty) : $unit;
+
+    if((float)$users[$cid]["bal"] < $price){ editm($cid,$mid,"💔 လက်ကျန်ငွေမလောက်ပါရှင့်\n\nAdmin - ".h(TOPUP)."\nUID : <code>$cid</code>",kmenu()); exit; }
+
+    editm($cid,$mid,"⏳ Processing...\n━━━━━━━━━━━━━━━━━━");
+
+    $sn=""; $err=""; $got=null;
+
+    foreach($codes as $code){
+      if($mode==="ML"){
+        $r=ml_order($t["uid"],$t["zone"],$code);
+        if(empty($r["ok"])){$err=$r["error"]??$r["message"]??"ML_ORDER_FAIL"; break;}
+        $sn=$sn?:($r["order_id"]??"OK");
+      }elseif($mode==="UC"){
+        $r=uc_order($t["pid"],$code,1);
+        if(empty($r["ok"])){$err=$r["error"]??"UC_ORDER_FAIL"; break;}
+        $sn=$sn?:($r["sn"]??"OK");
+      }else{
+        $r=code_order($code,$qty); // ✅ CODE uses item_id now
+        if(empty($r["ok"])){$err=$r["error"]??"CODE_ORDER_FAIL"; break;}
+        $sn=$sn?:($r["sn"]??"OK");
+        $got=$r["codes"]??null;
+      }
+    }
+
+    if($err){ editm($cid,$mid,"❌ <b>ORDER FAIL</b>\n━━━━━━━━━━━━━━━━━━\n<code>".h($err)."</code>",kmenu()); exit; }
+
+    $users[$cid]["bal"]=(float)$users[$cid]["bal"]-$price;
+
+    $hist=jr(HFILE); if(!is_array($hist)) $hist=[];
+    if(!isset($hist[$cid])||!is_array($hist[$cid])) $hist[$cid]=[];
+    $hist[$cid][]=["time"=>date("H:i d.m.Y"),"game"=>$mode,"order"=>$pick["name"],"sn"=>$sn,"amount"=>$price];
+    jw(HFILE,$hist);
+
+    $users[$cid]["st"]=""; $users[$cid]["tmp"]=[]; jw(UFILE,$users);
+
+    $extra="";
+    if($mode==="CODE" && $got){
+      $extra.="\n\n🎫 <b>𝐘𝐨𝐮𝐫 𝐏𝐔𝐁𝐆 𝐂𝐨𝐝𝐞</b>\n━━━━━━━━━━━━━━━━━━\n";
+      if(is_array($got)){ $i=0; foreach($got as $c){ if(++$i>20) break; $extra.="• <code>".h($c)."</code>\n"; } }
+      else $extra.="☩ <code>".h($got)."</code>\n\n<b>Copy ယူပြီးသိမ်းထားပါရှင့် ✅</b>";
+    }
+
+    editm($cid,$mid,"✅ <b>𝐒𝐔𝐂𝐂𝐄𝐒𝐒</b>\n━━━━━━━━━━━━━━━━━━\n".
+      "Item: <b>".h($pick["name"])."</b>\n".
+      (($mode==="CODE")?("Qty : <b>$qty</b>\n"):"").
+      "SN  : <code>".h($sn)."</code>\n".
+      "Paid : <b>".h(mmk($price))."</b>\n".
+      "Now : <b>".h(mmk($users[$cid]["bal"]))."</b>".$extra,
+      kmenu()
+    ); exit;
+  }
+
+  editm($cid,$mid,home_txt($users[$cid]["bal"]),kmenu()); exit;
+}
+
+/* ========= STATES ========= */
+if($st==="WAIT_TOPUP_AMT" && $txt){
+  if(!preg_match('/^\d{3,10}$/',$txt)){
+    send($cid,"❌ Amount ကို ကိန်းဂဏန်းနဲ့သာ ရိုက်ထည့်ပါ (ဥပမာ <code>5000</code>)",kmenu()); exit;
+  }
+  $amt=(int)$txt;
+  if($amt<500){
+    send($cid,"❌ အနည်းဆုံး 500 MMK နှင့် အထက် Topup လုပ်နိုင်ပါမယ်",kmenu()); exit;
+  }
+  $users[$cid]["st"]="WAIT_TOPUP_REF";
+  $users[$cid]["tmp"]=[
+    "top_amt"=>$amt,
+    "created"=>time()
+  ];
+  jw(UFILE,$users);
+
+  $body="💸 <b>Topup Order</b>\n━━━━━━━━━━━━━━━━━━\n".
+        "Amount : <b>".h(mmk($amt))."</b>\n".
+        "UID    : <code>$cid</code>\n\n".
+        "💳 <b>Bank / KBZPay လွှဲရန်</b>\n".
+        "Bank Name : KPay\n".
+        "Acc Name  : KageRan\n".
+        "Acc No    : 112233\n\n".
+        "ငွေလွှဲပြီးပြီဆိုရင် Bank ပြေစာပေါ်ကနောက်ဆုံး ၆လုံး Ref/ID ကို ဒီနေရာမှာပို့ပေးပါ\n".
+        "ဥပမာ: <code>123456</code>";
+  send($cid,$body,kmenu()); exit;
+}
+
+if($st==="WAIT_TOPUP_REF" && $txt){
+  if(!preg_match('/^\d{6}$/',$txt)){
+    send($cid,"❌ ပြေစာ ID သည် ၆လုံးကိန်းဂဏန်းသာ ပို့ပေးပါ (ဥပမာ <code>123456</code>)",kmenu()); exit;
+  }
+
+  $amt=(int)($users[$cid]["tmp"]["top_amt"]??0);
+  if($amt<=0){
+    $users[$cid]["st"]=""; $users[$cid]["tmp"]=[]; jw(UFILE,$users);
+    send($cid,"⏳ Session လွန်သွားပါပြန်\n\n/topup menu မှတဆင့် သို့မဟုတ် /start နဲ့ ပြန်စတင်ပေးပါ",kmenu()); exit;
+  }
+
+  $tups=jr(TFILE); if(!is_array($tups)) $tups=[];
+  $uname=$users[$cid]["uname"]??"";
+  $tups[]=[
+    "id"=>uniqid("t",true),
+    "cid"=>$cid,
+    "uname"=>$uname,
+    "amount"=>$amt,
+    "ref"=>$txt,
+    "time"=>date("H:i d.m.Y"),
+    "status"=>"pending"
+  ];
+  jw(TFILE,$tups);
+
+  $users[$cid]["st"]=""; $users[$cid]["tmp"]=[]; jw(UFILE,$users);
+
+  send($cid,"✅ <b>Topup Request ပေးပို့ပြီးပါပြီ</b>\n━━━━━━━━━━━━━━━━━━\n".
+            "Amount : <b>".h(mmk($amt))."</b>\n".
+            "Ref ID : <code>".h($txt)."</code>\n\n".
+            "Admin မှ စစ်ဆေးပြီးသွားတာနဲ့ Wallet ထဲသို့ ငွေဝင်သွားမည်ဖြစ်ပါသည်။",kmenu()); exit;
+}
+
+if($st==="WAIT_ML" && $txt){
+  if(!preg_match('/^(\d+)\s+(\d+)$/',$txt,$m)){ send($cid,"❌ Format: <code>gameid zoneid</code>",kmenu()); exit; }
+  $c=ml_check($m[1],$m[2]); if(empty($c["ok"])){ $users[$cid]["st"]=""; $users[$cid]["tmp"]=[]; jw(UFILE,$users); send($cid,"❌ ML FAIL\n<code>".h($c["error"])."</code>",kmenu()); exit; }
+  $users[$cid]["st"]="READY_ML"; $users[$cid]["tmp"]["uid"]=$c["gameid"]; $users[$cid]["tmp"]["zone"]=$c["zoneid"]; jw(UFILE,$users);
+  $page=(int)($users[$cid]["tmp"]["page"]??0);
+  send($cid,"✅ <b>𝗠𝗟𝗕𝗕 𝗢𝗿𝗱𝗲𝗿 𝗖𝗼𝗻𝗳𝗶𝗿𝗺</b>\nName: <b>".h($c["name"])."</b>\nGameID: <code>".h($c["gameid"])."</code> Zone: <code>".h($c["zoneid"])."</code>",kconfirm("ML",$page)); exit;
+}
+if($st==="WAIT_PUBG" && $txt){
+  if(!preg_match('/^\d{6,20}$/',$txt)){ send($cid,"❌ Format: <code>gameid</code>",kmenu()); exit; }
+  $c=pubg_check($txt); if(empty($c["ok"])){ $users[$cid]["st"]=""; $users[$cid]["tmp"]=[]; jw(UFILE,$users); send($cid,"❌ PUBG FAIL\n<code>".h($c["error"])."</code>",kmenu()); exit; }
+  $users[$cid]["st"]="READY_UC"; $users[$cid]["tmp"]["pid"]=$txt; jw(UFILE,$users);
+  $page=(int)($users[$cid]["tmp"]["page"]??0);
+  send($cid,"✅ <b>𝐏𝐔𝐁𝐆 𝐔𝐂 𝐎𝐫𝐝𝐞𝐫 𝐂𝐨𝐧𝐟𝐢𝐫𝐦</b>\nName: <b>".h($c["name"])."</b>\nGameID: <code>".h($txt)."</code>",kconfirm("UC",$page)); exit;
+}
+if($st==="WAIT_QTY" && $txt){
+  if(!preg_match('/^\d{1,2}$/',$txt)){ send($cid,"❌ Qty: <code>1-50</code>",kmenu()); exit; }
+  $qty=max(1,min(50,(int)$txt));
+  $users[$cid]["st"]="READY_CODE"; $users[$cid]["tmp"]["qty"]=$qty; jw(UFILE,$users);
+  $page=(int)($users[$cid]["tmp"]["page"]??0);
+  send($cid,"✅ <b>𝐏𝐔𝐁𝐆 𝐂𝐎𝐃𝐄 𝐎𝐫𝐝𝐞𝐫 𝐂𝐨𝐧𝐟𝐢𝐫𝐦</b>\nQty : <b>$qty</b>",kconfirm("CODE",$page)); exit;
+}
+
+/* ========= FALLBACK ========= */
+if($txt) send($cid,home_txt($users[$cid]["bal"]),kmenu());
