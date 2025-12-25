@@ -7,6 +7,9 @@ session_start();
 define("ADMIN_KEY","123456");      // ✅ change!
 define("BOT_TOKEN","7279743667:AAHbJKx12tWP5nY_zWF6TG-6fdl1NHCOls8");//BOT Token
 
+define("TOPUP","@Kage_Ran");
+
+define("AFILE",__DIR__."/data/admin.json");
 define("UFILE",__DIR__."/data/users.json");
 define("HFILE",__DIR__."/data/history.json");
 define("TFILE",__DIR__."/data/topups.json");    // pending topups
@@ -35,6 +38,25 @@ function jw($f,$d){
   @file_put_contents($tmp,json_encode($d,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE),LOCK_EX);
   @rename($tmp,$f);
 }
+function admin_cfg(){
+  $j=jr(AFILE);
+  return is_array($j)?$j:[];
+}
+function admin_cfg_save($cfg){
+  if(!is_array($cfg)) $cfg=[];
+  jw(AFILE,$cfg);
+}
+function admin_sig($cfg){
+  if(is_array($cfg) && !empty($cfg["pass_hash"])) return sha1("adm:".$cfg["pass_hash"]);
+  return sha1("adm:".ADMIN_KEY);
+}
+function admin_avatar_src($cfg){
+  if(!is_array($cfg)) return "";
+  $a=trim((string)($cfg["avatar"]??""));
+  if($a!=="" && preg_match('~^https?://~i',$a)) return $a;
+  if($a!=="" && preg_match('~^data/[^\\/]+\.(png|jpe?g|gif|webp)$~i',$a) && file_exists(__DIR__."/".$a)) return $a."?v=".@filemtime(__DIR__."/".$a);
+  return "";
+}
 function read_text($f,$fallback="[]"){
   if(!file_exists($f)) return $fallback;
   $t=trim((string)@file_get_contents($f));
@@ -48,16 +70,25 @@ function write_text_atomic($f,$txt){
   return true;
 }
 function auth(){
-  // ✅ already logged in?
-  if(!empty($_SESSION["admin_ok"]) && $_SESSION["admin_ok"]===sha1(ADMIN_KEY)){
-    return ADMIN_KEY;
+  $cfg=admin_cfg();
+  $sig=admin_sig($cfg);
+
+  if(!empty($_SESSION["admin_ok"]) && $_SESSION["admin_ok"]===$sig){
+    return "ok";
   }
 
-  // ✅ login by key / password
   $k=$_GET["key"]??$_POST["key"]??$_POST["password"]??"";
-  if($k===ADMIN_KEY){
-    $_SESSION["admin_ok"]=sha1(ADMIN_KEY);
-    // clean URL (remove key/password from query)
+  $k=(string)$k;
+
+  $ok=false;
+  if(!empty($cfg["pass_hash"])){
+    $ok=function_exists("password_verify") ? password_verify($k,(string)$cfg["pass_hash"]) : false;
+  }else{
+    $ok=hash_equals((string)ADMIN_KEY,$k);
+  }
+
+  if($ok){
+    $_SESSION["admin_ok"]=$sig;
     $view=$_GET["view"]??"users";
     header("Location: ?view=".$view);
     exit;
@@ -275,6 +306,9 @@ function looks_like_php($txt){
 
 /* ===== INIT ===== */
 $key=auth();
+$acfg=admin_cfg();
+$avatar=admin_avatar_src($acfg);
+
 $users=jr(UFILE); if(!is_array($users)) $users=[];
 $hist =jr(HFILE); if(!is_array($hist))  $hist=[];
 $tups =jr(TFILE); if(!is_array($tups))  $tups=[];
@@ -351,6 +385,75 @@ if(isset($_GET["logout"])){
   if(session_id()!=="") session_destroy();
   header("Location: ?");
   exit;
+}
+
+if(isset($_POST["admin_save_profile"])){
+  $acfg=admin_cfg();
+
+  $aurl=trim((string)($_POST["avatar_url"]??""));
+  if($aurl!=="" && !preg_match('~^https?://~i',$aurl)) $err="Avatar URL မမှန်ပါ";
+
+  if(!$err && !empty($_FILES["avatar_file"]["tmp_name"]) && is_uploaded_file($_FILES["avatar_file"]["tmp_name"])){
+    $sz=(int)($_FILES["avatar_file"]["size"]??0);
+    if($sz>MAX_IMG_MB*1024*1024) $err="Image too large (max ".MAX_IMG_MB."MB)";
+    else{
+      $tmp=$_FILES["avatar_file"]["tmp_name"];
+      $type=function_exists("exif_imagetype")?@exif_imagetype($tmp):0;
+      $ext=($type===IMAGETYPE_PNG?"png":($type===IMAGETYPE_GIF?"gif":($type===IMAGETYPE_WEBP?"webp":"jpg")));
+      $dst=__DIR__."/data/admin_avatar.".$ext;
+      @mkdir(__DIR__."/data",0777,true);
+      if(!@move_uploaded_file($tmp,$dst)) $err="Avatar upload failed";
+      else{
+        $acfg["avatar"]="data/admin_avatar.".$ext;
+        admin_cfg_save($acfg);
+        $msg="Profile Saved ✅";
+      }
+    }
+  }
+
+  if(!$err && empty($_FILES["avatar_file"]["tmp_name"])){
+    if($aurl!=="") $acfg["avatar"]=$aurl; else unset($acfg["avatar"]);
+    admin_cfg_save($acfg);
+    $msg="Profile Saved ✅";
+  }
+
+  $avatar=admin_avatar_src(admin_cfg());
+}
+
+if(isset($_POST["admin_save_noti"])){
+  $acfg=admin_cfg();
+  $cid=trim((string)($_POST["admin_chat_id"]??""));
+  if($cid!=="" && !preg_match('/^\d{5,20}$/',$cid)) $err="Admin Chat ID မမှန်ပါ";
+  else{
+    if($cid!=="") $acfg["admin_chat_id"]=(int)$cid; else unset($acfg["admin_chat_id"]);
+    $acfg["topup_admin_noti"]=isset($_POST["topup_admin_noti"])?1:0;
+    admin_cfg_save($acfg);
+    $msg="Notification Saved ✅";
+  }
+}
+
+if(isset($_POST["admin_change_pw"])){
+  $acfg=admin_cfg();
+  $old=(string)($_POST["old_pw"]??"");
+  $new=(string)($_POST["new_pw"]??"");
+  $cf =(string)($_POST["new_pw2"]??"");
+
+  $oldOk=false;
+  if(!empty($acfg["pass_hash"])) $oldOk=function_exists("password_verify") ? password_verify($old,(string)$acfg["pass_hash"]) : false;
+  else $oldOk=hash_equals((string)ADMIN_KEY,$old);
+
+  if(!$oldOk) $err="Old password မမှန်ပါ";
+  elseif($new==="" || mb_strlen($new)<6) $err="New password အနည်းဆုံး 6 လုံးထားပါ";
+  elseif($new!==$cf) $err="Confirm password မတူပါ";
+  else{
+    if(!function_exists("password_hash")) $err="password_hash မရှိပါ (PHP version စစ်ပါ)";
+    else{
+      $acfg["pass_hash"]=password_hash($new,PASSWORD_DEFAULT);
+      admin_cfg_save($acfg);
+      $_SESSION["admin_ok"]=admin_sig($acfg);
+      $msg="Password Changed ✅";
+    }
+  }
 }
 
 /* Ban / Unban user */
@@ -512,6 +615,7 @@ $tabs=[
   "broadcast"=>"📣 Broadcast",
   "prices"=>"🎮 Prices",
   "bot"=>"🧩 bot.php",
+  "settings"=>"⚙️ Settings",
   "history"=>"📜 History"
 ];
 ?>
@@ -564,6 +668,9 @@ code{background:rgba(0,0,0,.35);padding:2px 8px;border-radius:10px}
   <div class="brand">
     <div style="display:flex;align-items:center;gap:10px">
       <div class="dot"></div>
+      <?php if($avatar): ?>
+        <img src="<?=h($avatar)?>" style="width:36px;height:36px;border-radius:999px;object-fit:cover;border:1px solid rgba(255,255,255,.18)" alt="avatar">
+      <?php endif; ?>
       <div>
         <b>Admin Panel</b> <span class="mini">Secure Login ✅</span><br>
         <span class="mini">Theme: <b>#E91E63</b> • Users: <b><?=count($users)?></b></span>
@@ -575,7 +682,7 @@ code{background:rgba(0,0,0,.35);padding:2px 8px;border-radius:10px}
   </div>
   <div class="tabbar">
     <?php foreach($tabs as $k=>$n): ?>
-      <a class="tab <?=($view===$k?"act":"")?>" href="?key=<?=h($key)?>&view=<?=$k?>"><?=$n?></a>
+      <a class="tab <?=($view===$k?"act":"")?>" href="?view=<?=$k?>"><?=$n?></a>
     <?php endforeach; ?>
   </div>
 </div>
@@ -713,7 +820,6 @@ code{background:rgba(0,0,0,.35);padding:2px 8px;border-radius:10px}
     <div class="card">
       <h3>👤 Users</h3>
       <form method="get">
-        <input type="hidden" name="key" value="<?=h($key)?>">
         <input type="hidden" name="view" value="users">
         <div class="row">
           <input name="q" placeholder="Search CID..." value="<?=h($q)?>">
@@ -855,7 +961,6 @@ code{background:rgba(0,0,0,.35);padding:2px 8px;border-radius:10px}
     </div>
     <div class="card">
       <form method="get">
-        <input type="hidden" name="key" value="<?=h($key)?>">
         <input type="hidden" name="view" value="topup_history">
         <div class="row">
           <input name="topup_q" placeholder="Search by CID..." value="<?=h($topup_q)?>">
@@ -947,6 +1052,53 @@ code{background:rgba(0,0,0,.35);padding:2px 8px;border-radius:10px}
         <button class="btn" name="bot_upload_file" style="margin-top:10px">UPLOAD & REPLACE</button>
       </form>
       <div class="mini">Max <?=h(MAX_PHP_MB)?>MB • PHP မဟုတ်ရင် reject လုပ်မယ်</div>
+    </div>
+  <?php endif; ?>
+
+  <?php if($view==="settings"): ?>
+    <?php $cfg_now=admin_cfg(); ?>
+    <div class="card"><h3>⚙️ Settings</h3><div class="mini">Admin password change • Avatar • Topup notification</div></div>
+
+    <div class="card">
+      <h3>🖼️ Avatar</h3>
+      <form method="post" enctype="multipart/form-data">
+        <div class="row">
+          <input name="avatar_url" placeholder="Avatar Image URL (https://...)" value="<?=h((string)($cfg_now["avatar"]??""))?>">
+          <input type="file" name="avatar_file" accept="image/*">
+        </div>
+        <button class="btn" name="admin_save_profile" style="margin-top:10px">SAVE AVATAR</button>
+      </form>
+      <div class="mini">URL သို့မဟုတ် File တစ်ခုထဲကတစ်ခု ထည့်နိုင်ပါတယ် • Max <?=h(MAX_IMG_MB)?>MB</div>
+    </div>
+
+    <div class="card">
+      <h3>🔔 Topup Request Notification</h3>
+      <form method="post">
+        <div class="row">
+          <input name="admin_chat_id" placeholder="Admin Telegram Chat ID (numbers)" value="<?=h((string)($cfg_now["admin_chat_id"]??""))?>">
+          <input value="TOPUP: <?=h(TOPUP)?>" readonly>
+        </div>
+        <div style="margin-top:10px">
+          <label style="display:flex;gap:8px;align-items:center;font-size:13px;opacity:.9">
+            <input type="checkbox" name="topup_admin_noti" value="1" style="width:auto" <?=!isset($cfg_now["topup_admin_noti"])||!empty($cfg_now["topup_admin_noti"]) ? "checked" : ""?>>
+            Enable Admin Noti
+          </label>
+        </div>
+        <button class="btn" name="admin_save_noti" style="margin-top:10px">SAVE NOTI</button>
+      </form>
+      <div class="mini">Chat ID မသိရင် Bot ကို Admin account နဲ့ /start လုပ်ပြီး CID ကို Users tab မှာ ကြည့်နိုင်ပါတယ်</div>
+    </div>
+
+    <div class="card">
+      <h3>🔐 Change Admin Password</h3>
+      <form method="post">
+        <input type="password" name="old_pw" placeholder="Old Password" required>
+        <div class="row" style="margin-top:10px">
+          <input type="password" name="new_pw" placeholder="New Password (min 6 chars)" required>
+          <input type="password" name="new_pw2" placeholder="Confirm New Password" required>
+        </div>
+        <button class="btn" name="admin_change_pw" style="margin-top:10px">CHANGE PASSWORD</button>
+      </form>
     </div>
   <?php endif; ?>
 

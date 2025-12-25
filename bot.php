@@ -20,6 +20,7 @@ define("ML_FILE",__DIR__."/prices.json");
 define("UC_FILE",__DIR__."/pubg_prices.json");        // bot-side list (wrapper or array)
 define("CODE_FILE",__DIR__."/pubg_code_prices.json"); // bot-side list (wrapper or array)
 
+define("AFILE",__DIR__."/data/admin.json");
 define("UFILE",__DIR__."/data/users.json");
 define("HFILE",__DIR__."/data/history.json");
 define("TFILE",__DIR__."/data/topups.json");          // pending topup requests
@@ -108,6 +109,24 @@ function postj($url,$payload,$hdr=[]){
   return is_array($j)?$j:["ok"=>0,"error"=>"Invalid JSON","raw"=>$r];
 }
 function mmk($n){ return number_format((int)round((float)$n))." MMK"; }
+
+function admin_cfg(){
+  if(!file_exists(AFILE)) return [];
+  $j=json_decode(file_get_contents(AFILE),true);
+  return is_array($j)?$j:[];
+}
+function admin_chat_id($users,$cfg=null){
+  $cfg=is_array($cfg)?$cfg:[];
+  $x=(string)($cfg["admin_chat_id"]??"");
+  if($x!=="" && preg_match('/^\d{5,20}$/',$x)) return (int)$x;
+  $want=ltrim((string)TOPUP,"@");
+  if($want!=="" && is_array($users)){
+    foreach($users as $id=>$ud){
+      if((string)($ud["uname"]??"")===$want && preg_match('/^\d+$/',(string)$id)) return (int)$id;
+    }
+  }
+  return 0;
+}
 
 /* ========= ID CHECK ========= */
 function g2_name($r){
@@ -549,16 +568,33 @@ if($st==="WAIT_TOPUP_REF" && $txt){
 
   $tups=jr(TFILE); if(!is_array($tups)) $tups=[];
   $uname=$users[$cid]["uname"]??"";
+  $time=date("H:i d.m.Y");
+  $tid=uniqid("t",true);
   $tups[]=[
-    "id"=>uniqid("t",true),
+    "id"=>$tid,
     "cid"=>$cid,
     "uname"=>$uname,
     "amount"=>$amt,
     "ref"=>$txt,
-    "time"=>date("H:i d.m.Y"),
+    "time"=>$time,
     "status"=>"pending"
   ];
   jw(TFILE,$tups);
+
+  $cfg=admin_cfg();
+  $noti=!isset($cfg["topup_admin_noti"]) || !empty($cfg["topup_admin_noti"]);
+  $adminId=admin_chat_id($users,$cfg);
+  if($noti && $adminId>0){
+    $un=$uname!==""?"@".$uname:"-";
+    $m="🔔 <b>New Topup Request</b>\n━━━━━━━━━━━━━━━━━━\n".
+       "CID : <code>".h($cid)."</code>\n".
+       "User: ".h($un)."\n".
+       "Amount: <b>".h(mmk($amt))."</b>\n".
+       "Ref ID: <code>".h($txt)."</code>\n".
+       "Time: ".h($time)."\n\n".
+       "Approve/Reject ကို admin panel ထဲက Topup Req tab မှာလုပ်ပါ";
+    send($adminId,$m);
+  }
 
   $users[$cid]["st"]=""; $users[$cid]["tmp"]=[]; jw(UFILE,$users);
 
